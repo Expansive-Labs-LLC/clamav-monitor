@@ -261,7 +261,19 @@ async function timerInfo() {
     // A unit that has never run also reports Result=success, so a failure is
     // only meaningful once the timer has actually fired at least once.
     const ran = Boolean(last);
-    const failed = ran && (outcome.result !== 'success' || outcome.state === 'failed');
+
+    // 'activating' is the normal state for a scan in progress: the helper uses
+    // `systemctl start --no-block`, so the click returns long before the scan
+    // does. Without this the UI has nothing to say between "started" and
+    // "finished", and the log still shows the *previous* run's summary at the
+    // bottom -- which reads as though nothing happened.
+    const running = outcome.state === 'activating' || outcome.state === 'active';
+
+    // A verdict on the last run is only meaningful once one has completed;
+    // while a scan is in flight these properties still describe the run before
+    // it, so do not paint the current scan with the old outcome.
+    const failed = ran && !running &&
+      (outcome.result !== 'success' || outcome.state === 'failed');
 
     return {
       ...t,
@@ -270,6 +282,7 @@ async function timerInfo() {
       last: last ? last.toLocaleString() : null,
       calendar: m ? m[1].trim() : null,
       installed: Boolean(row),
+      running,
       lastFailed: failed,
       lastResult: outcome.result,
       lastExitCode: outcome.exitCode,
