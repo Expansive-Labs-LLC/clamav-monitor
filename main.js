@@ -36,8 +36,14 @@ const SERVICES = [
 ];
 
 const TIMERS = [
-  { id: 'clamav-quickscan.timer', label: 'Daily quick scan', service: 'clamav-quickscan.service' },
-  { id: 'clamav-fullscan.timer', label: 'Weekly full scan', service: 'clamav-fullscan.service' },
+  {
+    id: 'clamav-quickscan.timer', label: 'Daily quick scan',
+    service: 'clamav-quickscan.service', log: 'scan-quick',
+  },
+  {
+    id: 'clamav-fullscan.timer', label: 'Weekly full scan',
+    service: 'clamav-fullscan.service', log: 'scan-full',
+  },
 ];
 
 const LOGS = {
@@ -221,6 +227,59 @@ function humanDuration(ms) {
 // whether it worked. Without this, a scan that never connected to clamd (which
 // still prints "Infected files: 0" into its log) is indistinguishable on the
 // dashboard from a scan that came back clean.
+// ClamAV's own strings, not the wrapper script's framing, so this survives
+// whatever a given setup names its scan units and log banners.
+//
+// The distinction that matters: clamdscan exits 2 for *any* error, whether it
+// scanned nothing at all or scanned everything and skipped a few sockets. A
+// quick scan covering /tmp hits the second case on every single run, so
+// treating exit 2 as failure produces a permanent false alarm -- the mirror of
+// the false-green bug, and no more honest.
+async function scanLogSummary(name) {
+  const file = LOGS[name];
+  if (!file) return null;
+  let text;
+  try {
+    text = await fs.readFile(file, 'utf8');
+  } catch {
+    return null;   // not readable without the clamav group; caller degrades
+  }
+
+  // Scoping this to the last run is the whole game. A fixed-size tail spans
+  // several runs, and one earlier "Could not connect" is then enough to report
+  // a scan that worked fine as one that never happened -- which is exactly the
+  // false alarm this function exists to prevent.
+  //
+  // "SCAN SUMMARY" is clamscan's own end-of-run marker, so the lines after the
+  // second-to-last one belong to the run that just finished. (A run that died
+  // before writing a summary leaves the previous run's block as the newest;
+  // the systemd exit code still drives the verdict in that case.)
+  const all = text.split('\n');
+  const marks = [];
+  for (let i = 0; i < all.length; i++) {
+    if (all[i].includes('SCAN SUMMARY')) marks.push(i);
+  }
+  const start = marks.length >= 2 ? marks[marks.length - 2] + 1 : 0;
+  const tail = all.slice(start);
+
+  const find = (re) => {
+    for (let i = tail.length - 1; i >= 0; i--) {
+      const m = tail[i].match(re);
+      if (m) return m[1];
+    }
+    return null;
+  };
+
+  const infected = find(/^Infected files:\s*(\d+)/);
+  const errors = find(/^Total errors:\s*(\d+)/);
+  return {
+    completed: tail.some((l) => l.includes('SCAN SUMMARY')),
+    unreachable: tail.some((l) => /Could not connect to clamd/.test(l)),
+    infected: infected === null ? null : Number(infected),
+    errors: errors === null ? null : Number(errors),
+  };
+}
+
 async function serviceOutcome(unit) {
   const props = 'Result,ExecMainStatus,ActiveState,ExecMainExitTimestamp';
   const res = await run('systemctl', ['show', unit, `--property=${props}`]);
@@ -234,6 +293,57 @@ async function serviceOutcome(unit) {
     result: out.Result || 'unknown',
     exitCode: Number.isFinite(code) ? code : null,
     state: out.ActiveState || 'unknown',
+  };
+}
+
+// Four outcomes a finished scan can have, kept distinct because collapsing
+// them is how this dashboard lies. Exit codes are clamscan/clamdscan's:
+// 0 clean, 1 detections, 2 "some error occurred".
+function classifyScan(outcome, log) {
+  // Killed by a signal, timed out, or never exec'd: not a scan result at all.
+  if (outcome.result !== 'success' && outcome.result !== 'exit-code') {
+    return { severity: 'failed', message: `The scan did not run (${outcome.result}).` };
+  }
+
+  if (outcome.exitCode === 1 || (log && log.infected > 0)) {
+    const n = log?.infected;
+    return {
+      severity: 'detections',
+      message: n ? `${n} infected file${n === 1 ? '' : 's'} found — open the log.`
+                 : 'Detections found — open the log.',
+    };
+  }
+
+  if (outcome.exitCode === 0) return { severity: 'ok', message: null };
+
+  // Exit 2. Everything below is about telling "scanned nothing" apart from
+  // "scanned everything, skipped some unreadable files".
+  if (log?.unreachable) {
+    return {
+      severity: 'failed',
+      message: 'Could not reach the scanner daemon, so nothing was scanned — ' +
+               'the log still reports "Infected files: 0".',
+    };
+  }
+
+  if (log?.completed) {
+    const n = log.errors;
+    return {
+      severity: 'errors',
+      message: n
+        ? `Completed with ${n} error${n === 1 ? '' : 's'} — usually sockets and ` +
+          'other special files that cannot be read. Nothing infected.'
+        : 'Completed with errors. Nothing infected.',
+    };
+  }
+
+  // Exit 2 and the log is unreadable (no clamav group) or has no summary:
+  // say what is known rather than guessing either way.
+  return {
+    severity: 'errors',
+    message: log === null
+      ? 'Exited with errors (code 2). Grant log access on the Logs tab to see why.'
+      : 'Exited with errors (code 2) and wrote no summary — check the log.',
   };
 }
 
@@ -252,9 +362,10 @@ async function timerInfo() {
     // Reported as "{ OnCalendar=*-*-* 12:30:00 ; next_elapse=... }" -- pull out
     // just the expression so the Configure tab shows what is really in effect,
     // including any drop-in override the app itself wrote.
-    const [cal, outcome] = await Promise.all([
+    const [cal, outcome, log] = await Promise.all([
       run('systemctl', ['show', t.id, '-p', 'TimersCalendar', '--value']),
       serviceOutcome(t.service),
+      scanLogSummary(t.log),
     ]);
     const m = cal.stdout.match(/OnCalendar=([^;}]+)/);
 
@@ -272,8 +383,9 @@ async function timerInfo() {
     // A verdict on the last run is only meaningful once one has completed;
     // while a scan is in flight these properties still describe the run before
     // it, so do not paint the current scan with the old outcome.
-    const failed = ran && !running &&
-      (outcome.result !== 'success' || outcome.state === 'failed');
+    const verdict = (ran && !running)
+      ? classifyScan(outcome, log)
+      : { severity: 'unknown', message: null };
 
     return {
       ...t,
@@ -283,10 +395,13 @@ async function timerInfo() {
       calendar: m ? m[1].trim() : null,
       installed: Boolean(row),
       running,
-      lastFailed: failed,
+      lastSeverity: verdict.severity,
+      lastMessage: verdict.message,
       lastResult: outcome.result,
       lastExitCode: outcome.exitCode,
       serviceState: outcome.state,
+      lastErrors: log?.errors ?? null,
+      lastInfected: log?.infected ?? null,
     };
   }));
 }

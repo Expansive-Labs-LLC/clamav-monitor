@@ -23,6 +23,13 @@ unit skipped by an unmet `Condition*` check is called out rather than shown as
 merely stopped, and a scheduled scan that exited non-zero is flagged even
 though its log summary still says `Infected files: 0`.
 
+Scheduled scans are reported by outcome, not just by exit code. ClamAV exits
+`2` for *any* error, which covers both "could not reach the daemon, nothing was
+scanned" and "scanned everything, skipped a few sockets in `/tmp`" — so the
+dashboard reads the scan log to tell those apart, and only the first is shown
+as a failure. A scan in progress says so, since it can outlast the click that
+started it by half an hour.
+
 **Configure** — toggle real-time blocking, add or remove watched folders, edit
 scan schedules (validated by `systemd-analyze calendar` before saving), and
 start/stop/restart services.
@@ -65,10 +72,20 @@ its polkit policy. Launch it from your applications menu or run
 <details>
 <summary>apt prints "Download is performed unsandboxed as root…"</summary>
 
-Harmless — note the `N:` (notice) prefix. Ubuntu defaults home directories to
-`0750`, and the `_apt` user cannot traverse them to reach the file, so apt
-performs the local copy as root instead of dropping privileges. The package
-still installs correctly. To avoid it, install from a path `_apt` can read:
+In full, it usually ends with what looks like a fatal error:
+
+```
+N: Download is performed unsandboxed as root as file
+'/home/you/Downloads/clamav-monitor_1.0.2_amd64.deb' couldn't be accessed by
+user '_apt'. - pkgAcquire::Run (13: Permission denied)
+```
+
+Harmless — note the `N:` (notice) prefix, which applies to the `pkgAcquire`
+clause too. Ubuntu defaults home directories to `0750`, and the `_apt` user
+cannot traverse them to reach the file, so apt performs the local copy as root
+instead of dropping privileges. The package still installs correctly; confirm
+with `dpkg -l clamav-monitor`, which should show state `ii`. To avoid the
+notice, install from a path `_apt` can read:
 
 ```bash
 cp clamav-monitor_*_amd64.deb /tmp/ && sudo apt install /tmp/clamav-monitor_*_amd64.deb
