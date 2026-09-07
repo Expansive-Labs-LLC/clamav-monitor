@@ -1,3 +1,10 @@
+## [1.0.2](https://github.com/Expansive-Labs-LLC/clamav-monitor/compare/v1.0.1...v1.0.2) (2026-09-07)
+
+
+### Bug Fixes
+
+* show scans in progress instead of the previous run's verdict ([dc1d3d7](https://github.com/Expansive-Labs-LLC/clamav-monitor/commit/dc1d3d7ed952b69775c3ea0c99b1d125c004df26))
+
 ## [1.0.1](https://github.com/Expansive-Labs-LLC/clamav-monitor/compare/v1.0.0...v1.0.1) (2026-09-07)
 
 
