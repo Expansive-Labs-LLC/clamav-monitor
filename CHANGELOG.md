@@ -1,3 +1,10 @@
+## [1.0.3](https://github.com/Expansive-Labs-LLC/clamav-monitor/compare/v1.0.2...v1.0.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* tell a scan that skipped files apart from one that never ran ([6d9059d](https://github.com/Expansive-Labs-LLC/clamav-monitor/commit/6d9059d5c8484c5e1cf9745fc7f0336598d5ed7d))
+
 ## [1.0.2](https://github.com/Expansive-Labs-LLC/clamav-monitor/compare/v1.0.1...v1.0.2) (2026-09-07)
 
 
