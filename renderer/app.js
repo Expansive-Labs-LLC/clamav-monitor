@@ -143,6 +143,14 @@ function renderTimers(timers) {
       card.append(el('p', 'sub', 'Not scheduled'));
     }
     card.append(el('p', 'sub', t.last && t.last !== 'n/a' ? `Last run: ${t.last}` : 'Never run yet'));
+    if (t.running) {
+      const line = el('div', 'status-line');
+      line.append(el('span', 'dot ok'));
+      line.append(el('span', 'status-text', 'Scanning now'));
+      card.append(line);
+      card.append(el('p', 'sub',
+        'The log fills in as it goes, and the summary is written at the end.'));
+    }
     if (t.lastFailed) {
       const detail = t.lastExitCode !== null && t.lastExitCode !== undefined
         ? ` (exit ${t.lastExitCode})`
