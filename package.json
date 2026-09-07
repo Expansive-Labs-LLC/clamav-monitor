@@ -1,0 +1,106 @@
+{
+  "name": "clamav-monitor",
+  "version": "1.0.0",
+  "description": "Desktop monitor and configuration UI for the local ClamAV setup",
+  "main": "main.js",
+  "author": "Expansive Labs <derek@expansivelabs.io>",
+  "license": "MIT",
+  "homepage": "https://expansivelabs.io",
+  "_comments": {
+    "desktopName": "Must sit at package.json root, not under build.linux (the schema rejects it there, and rejects unknown keys inside `build` too). Electron uses it as app_id / WM_CLASS; linux.syncDesktopName makes the installed .desktop filename match, so the window links to its launcher entry.",
+    "productName": "build.productName is deliberately hyphenated rather than 'ClamAV Monitor': it determines the install directory, and a space there makes Chromium's zygote re-exec split the path -- execvp('/opt/ClamAV') -> FATAL on every desktop launch, while a terminal launch via the symlink still works. The human-readable name comes from build.linux.desktop.entry.Name."
+  },
+  "desktopName": "clamav-monitor.desktop",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "selftest": "env -u ELECTRON_RUN_AS_NODE electron . --selftest",
+    "icon": "python3 scripts/make-icon.py",
+    "lint": "node --check main.js && node --check preload.js && node --check renderer/app.js && bash -n helper/clamav-monitor-helper && bash -n scripts/install-helper.sh && node -e \"JSON.parse(require('fs').readFileSync('package.json'))\"",
+    "install-helper": "bash scripts/install-helper.sh",
+    "dist": "npm run icon && electron-builder --linux deb",
+    "dist:all": "npm run icon && electron-builder --linux deb AppImage"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/exec": "^7.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "semantic-release": "^25.0.9"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Expansive-Labs-LLC/clamav-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Expansive-Labs-LLC/clamav-monitor/issues"
+  },
+  "keywords": [
+    "clamav",
+    "antivirus",
+    "electron",
+    "linux",
+    "security"
+  ],
+  "build": {
+    "appId": "io.expansivelabs.clamavmonitor",
+    "productName": "clamav-monitor",
+    "copyright": "Copyright © 2026 Expansive Labs",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "helper",
+        "to": "helper",
+        "filter": [
+          "clamav-monitor-helper",
+          "*.policy"
+        ]
+      }
+    ],
+    "linux": {
+      "target": [
+        "deb"
+      ],
+      "category": "System;Security;Monitor;",
+      "icon": "build/icons",
+      "executableName": "clamav-monitor",
+      "synopsis": "Monitor and configure ClamAV protection",
+      "description": "Monitor and configure ClamAV protection: service status, signature freshness, scans, and logs.",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "Name": "ClamAV Monitor",
+          "GenericName": "Antivirus Monitor",
+          "Keywords": "antivirus;virus;malware;scan;clamav;security;protection;",
+          "SingleMainWindow": "true"
+        }
+      }
+    },
+    "deb": {
+      "packageName": "clamav-monitor",
+      "priority": "optional",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libsecret-1-0",
+        "pkexec"
+      ],
+      "afterInstall": "build/postinst.sh",
+      "afterRemove": "build/postrm.sh"
+    }
+  }
+}

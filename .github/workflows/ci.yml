@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Lint and build (.deb)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # python3-pil renders the icon set; fakeroot and desktop-file-utils are
+      # needed to build and then validate the .deb.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-pil fakeroot desktop-file-utils
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build package
+        run: npm run dist
+
+      # A .deb that builds but installs a broken launcher is the failure mode
+      # worth catching, so assert the desktop entry and helper actually landed.
+      - name: Verify package contents
+        run: |
+          DEB=$(ls dist/*.deb)
+          echo "Inspecting $DEB"
+          mkdir -p /tmp/debcheck
+          dpkg-deb -x "$DEB" /tmp/debcheck
+          dpkg-deb -e "$DEB" /tmp/debcheck/DEBIAN
+
+          desktop-file-validate /tmp/debcheck/usr/share/applications/clamav-monitor.desktop
+
+          test -f /tmp/debcheck/opt/clamav-monitor/resources/helper/clamav-monitor-helper
+          test -f /tmp/debcheck/opt/clamav-monitor/resources/helper/io.expansivelabs.clamavmonitor.policy
+          test -f /tmp/debcheck/usr/share/icons/hicolor/256x256/apps/clamav-monitor.png
+          grep -q 'StartupWMClass=clamav-monitor' \
+            /tmp/debcheck/usr/share/applications/clamav-monitor.desktop
+          grep -q '/usr/bin/clamav-monitor' /tmp/debcheck/DEBIAN/postinst
+          grep -q 'chmod 4755' /tmp/debcheck/DEBIAN/postinst
+
+          # A space anywhere in the install path makes Chromium's zygote
+          # re-exec fail with execvp of the truncated path, killing every
+          # desktop launch while a terminal launch still works. Read the
+          # payload as a tar listing so each line is exactly one path --
+          # parsing `dpkg-deb -c` columns cannot distinguish a path containing
+          # a space from the column separators.
+          if dpkg-deb --fsys-tarfile "$DEB" | tar -tf - | grep ' '; then
+            echo "ERROR: the above packaged paths contain spaces" >&2
+            exit 1
+          fi
+
+          echo "package contents OK"
+
+      - name: Install and remove the package
+        run: |
+          DEB=$(ls dist/*.deb)
+          sudo apt-get install -y "./$DEB"
+          test -x /usr/lib/clamav-monitor/clamav-monitor-helper
+          test -f /usr/share/polkit-1/actions/io.expansivelabs.clamavmonitor.policy
+          test -L /usr/bin/clamav-monitor
+          sudo apt-get remove -y clamav-monitor
+          test ! -e /usr/lib/clamav-monitor/clamav-monitor-helper
+          echo "install/remove cycle OK"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clamav-monitor-deb
+          path: dist/*.deb
+          if-no-files-found: error

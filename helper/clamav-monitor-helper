@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# /usr/local/bin/clamav-monitor-helper
+#
+# The only root-privileged surface of ClamAV Monitor. Invoked via pkexec by the
+# Electron main process. Every subcommand validates its own arguments: the GUI
+# is treated as untrusted input, so nothing here interpolates a caller-supplied
+# string into a shell command.
+set -euo pipefail
+
+CLAMD_CONF=/usr/local/etc/clamd.conf
+UNITS_DIR=/etc/systemd/system
+
+die() { echo "error: $*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (invoke via pkexec)"
+
+# Units this helper is willing to touch. Anything else is refused, so the GUI
+# cannot use it as a generic systemctl proxy.
+ALLOWED_UNITS=(
+  clamd
+  clamav-freshclam
+  clamav-clamonacc
+  clamav-quickscan.timer
+  clamav-fullscan.timer
+)
+
+unit_allowed() {
+  local u="$1"
+  for a in "${ALLOWED_UNITS[@]}"; do [ "$a" = "$u" ] && return 0; done
+  return 1
+}
+
+# Reject anything that is not a plain absolute path to a real directory.
+validate_dir() {
+  local p="$1"
+  case "$p" in
+    /*) ;;
+    *) die "path must be absolute" ;;
+  esac
+  case "$p" in
+    *..*) die "path may not contain .." ;;
+    *[$'\n\r']*) die "path may not contain newlines" ;;
+  esac
+  [ -d "$p" ] || die "not a directory: $p"
+}
+
+reload_clamd() {
+  systemctl restart clamd
+  # clamonacc holds an fanotify mount mark tied to the daemon's config; it must
+  # be restarted after clamd or it keeps enforcing the previous path set.
+  systemctl is-enabled clamav-clamonacc >/dev/null 2>&1 && \
+    systemctl restart clamav-clamonacc || true
+}
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+
+  update)
+    # freshclam refuses to run while the updater daemon holds the lock.
+    systemctl stop clamav-freshclam
+    freshclam || true
+    systemctl start clamav-freshclam
+    ;;
+
+  scan)
+    case "${1:-}" in
+      quick)  systemctl start --no-block clamav-quickscan.service ;;
+      full)   systemctl start --no-block clamav-fullscan.service ;;
+      system)
+        systemd-run --unit=clamav-fullsystem \
+          --description="ClamAV full system scan" \
+          --property=Nice=10 \
+          --property=IOSchedulingClass=idle \
+          /usr/local/bin/clamav-fullsystem
+        ;;
+      *) die "scan takes quick|full|system" ;;
+    esac
+    ;;
+
+  service)
+    verb="${1:-}"; unit="${2:-}"
+    case "$verb" in start|stop|restart) ;; *) die "verb must be start|stop|restart" ;; esac
+    unit_allowed "$unit" || die "unit not permitted: $unit"
+    systemctl "$verb" "$unit"
+    ;;
+
+  set-prevention)
+    val="${1:-}"
+    case "$val" in yes|no) ;; *) die "value must be yes or no" ;; esac
+    if grep -qE '^\s*OnAccessPrevention\b' "$CLAMD_CONF"; then
+      sed -i -E "s|^\s*OnAccessPrevention\b.*|OnAccessPrevention $val|" "$CLAMD_CONF"
+    else
+      printf '\nOnAccessPrevention %s\n' "$val" >>"$CLAMD_CONF"
+    fi
+    reload_clamd
+    ;;
+
+  add-path)
+    p="${1:-}"
+    validate_dir "$p"
+    if grep -qxF "OnAccessIncludePath $p" "$CLAMD_CONF"; then
+      echo "already present"
+    else
+      printf 'OnAccessIncludePath %s\n' "$p" >>"$CLAMD_CONF"
+      reload_clamd
+    fi
+    ;;
+
+  remove-path)
+    p="${1:-}"
+    case "$p" in /*) ;; *) die "path must be absolute" ;; esac
+    # grep -vxF matches the whole line literally, so a path containing regex
+    # metacharacters cannot delete unrelated lines.
+    tmp="$(mktemp)"
+    grep -vxF "OnAccessIncludePath $p" "$CLAMD_CONF" >"$tmp"
+    cat "$tmp" >"$CLAMD_CONF"
+    rm -f "$tmp"
+    reload_clamd
+    ;;
+
+  set-timer)
+    which="${1:-}"; calendar="${2:-}"
+    case "$which" in
+      quick) unit=clamav-quickscan.timer ;;
+      full)  unit=clamav-fullscan.timer ;;
+      *) die "timer must be quick|full" ;;
+    esac
+    [ -n "$calendar" ] || die "empty calendar expression"
+    # Let systemd itself be the validator rather than trusting a regex.
+    systemd-analyze calendar "$calendar" >/dev/null 2>&1 \
+      || die "invalid OnCalendar expression: $calendar"
+
+    d="$UNITS_DIR/${unit}.d"
+    mkdir -p "$d"
+    # The empty OnCalendar= is required: without it systemd ADDS to the
+    # existing schedule instead of replacing it, silently doubling the runs.
+    cat >"$d/override.conf" <<EOF
+[Timer]
+OnCalendar=
+OnCalendar=$calendar
+EOF
+    systemctl daemon-reload
+    systemctl restart "$unit"
+    ;;
+
+  read-log)
+    # Lets the UI show logs without waiting for a re-login to pick up the
+    # clamav group. Name is matched against a fixed list, so no caller-supplied
+    # string ever reaches a path.
+    name="${1:-}"
+    case "$name" in
+      clamd|freshclam|clamonacc|scan-quick|scan-full) ;;
+      *) die "unknown log: $name" ;;
+    esac
+    f="/var/log/clamav/${name}.log"
+    [ -f "$f" ] && tail -n 500 "$f"
+    exit 0        # before the trailing "ok", which would corrupt the output
+    ;;
+
+  grant-access)
+    # Lets the desktop user read clamav-owned logs and reach the clamd socket
+    # without a password prompt on every refresh.
+    target="${PKEXEC_UID:-}"
+    [ -n "$target" ] || die "PKEXEC_UID not set"
+    user="$(id -nu "$target")" || die "cannot resolve uid $target"
+    usermod -aG clamav "$user"
+    echo "added $user to group clamav; log out and back in to take effect"
+    ;;
+
+  *)
+    die "unknown command: ${cmd:-<none>}"
+    ;;
+esac
+
+echo "ok"

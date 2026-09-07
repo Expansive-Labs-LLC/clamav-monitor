@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;" />
+<title>ClamAV Monitor</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="shield" aria-hidden="true"></span>
+    <div>
+      <h1>ClamAV Monitor</h1>
+      <p id="engine-line" class="sub">Loading…</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span id="refresh-note" class="sub"></span>
+    <button id="btn-refresh" class="btn ghost">Refresh</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden" role="status"></div>
+
+<nav class="tabs" role="tablist">
+  <button class="tab active" data-tab="dashboard" role="tab">Dashboard</button>
+  <button class="tab" data-tab="configure" role="tab">Configure</button>
+  <button class="tab" data-tab="logs" role="tab">Logs</button>
+</nav>
+
+<main>
+  <!-- ---------------------------------------------------------------- -->
+  <section id="tab-dashboard" class="panel active">
+
+    <h2 class="section-title">Protection status</h2>
+    <div id="services" class="card-grid"></div>
+
+    <h2 class="section-title">Signature database</h2>
+    <div id="database" class="card wide"></div>
+
+    <h2 class="section-title">Scheduled scans</h2>
+    <div id="timers" class="card-grid"></div>
+
+    <h2 class="section-title">Run a scan now</h2>
+    <div class="actions">
+      <button class="btn" data-action="update-signatures">Update signatures</button>
+      <button class="btn" data-action="scan-quick">Quick scan</button>
+      <button class="btn" data-action="scan-full">Full home scan</button>
+      <button class="btn danger" data-action="scan-system">Entire system scan</button>
+    </div>
+    <p class="hint">
+      Scans run in the background as systemd units. A full system scan covers
+      roughly 2&nbsp;TB and can take several hours &mdash; watch progress under Logs.
+    </p>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section id="tab-configure" class="panel">
+
+    <h2 class="section-title">Real-time protection</h2>
+    <div class="card wide">
+      <div class="row between">
+        <div>
+          <strong>Block access to infected files</strong>
+          <p class="sub">
+            When on, opening an infected file fails with
+            <code>Operation not permitted</code>. When off, detections are
+            logged but access is allowed.
+          </p>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="prevention-toggle" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <h2 class="section-title">Watched folders</h2>
+    <div class="card wide">
+      <p class="sub">
+        Folders monitored in real time. Keep this to places where untrusted
+        files arrive &mdash; adding large build or cache trees will slow down
+        file access noticeably.
+      </p>
+      <ul id="path-list" class="path-list"></ul>
+      <div class="row gap">
+        <input type="text" id="path-input" class="input" placeholder="/home/derek/SomeFolder" />
+        <button id="btn-add-path" class="btn">Add folder</button>
+      </div>
+      <p id="path-error" class="error hidden"></p>
+    </div>
+
+    <h2 class="section-title">Scan schedule</h2>
+    <div class="card wide">
+      <div class="row gap schedule-row">
+        <label for="sched-quick">Quick scan</label>
+        <input type="text" id="sched-quick" class="input mono" />
+        <button class="btn" disabled data-schedule="quick">Save</button>
+      </div>
+      <div class="row gap schedule-row">
+        <label for="sched-full">Full scan</label>
+        <input type="text" id="sched-full" class="input mono" />
+        <button class="btn" disabled data-schedule="full">Save</button>
+      </div>
+      <p class="hint">
+        systemd calendar syntax &mdash; e.g. <code>*-*-* 12:30:00</code> for daily,
+        <code>Sun *-*-* 02:00:00</code> for weekly.
+      </p>
+      <p id="sched-error" class="error hidden"></p>
+    </div>
+
+    <h2 class="section-title">Services</h2>
+    <div id="service-controls" class="card wide"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section id="tab-logs" class="panel">
+    <div class="row gap logs-toolbar">
+      <select id="log-select" class="input">
+        <option value="scan-quick">Quick scan results</option>
+        <option value="scan-full">Full scan results</option>
+        <option value="clamd">Scanner daemon</option>
+        <option value="freshclam">Signature updates</option>
+        <option value="clamonacc">Real-time protection</option>
+      </select>
+      <label class="checkline">
+        <input type="checkbox" id="only-detections" /> Detections only
+      </label>
+      <button id="btn-log-refresh" class="btn ghost">Reload</button>
+    </div>
+    <pre id="log-view" class="log">Select a log to view.</pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
