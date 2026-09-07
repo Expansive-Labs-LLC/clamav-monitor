@@ -47,12 +47,21 @@ function serviceCard(svc) {
   if (!svc.installed) {
     dot = 'idle';
     text = 'Not installed';
+  } else if (svc.degraded) {
+    // Deliberately red rather than amber, and never "Running". systemd says
+    // this unit is active; it is also doing nothing, and a green dot over an
+    // unprotected machine is the worst thing this dashboard could show.
+    dot = 'bad';
+    text = 'Not protecting';
   } else if (svc.active === 'active') {
     dot = 'ok';
     text = 'Running';
   } else if (svc.active === 'failed') {
     dot = 'bad';
     text = 'Failed';
+  } else if (svc.conditionFailed) {
+    dot = 'bad';
+    text = 'Blocked by start condition';
   } else {
     dot = 'warn';
     text = 'Stopped';
@@ -64,6 +73,16 @@ function serviceCard(svc) {
     line.append(el('span', 'sub', '· not enabled at boot'));
   }
   card.append(line);
+  if (svc.degraded && svc.degradedReason) {
+    card.append(el('p', 'error', svc.degradedReason));
+  }
+  if (svc.conditionFailed) {
+    // "Enabled but never starts, and systemd calls that success" is baffling
+    // without being told where to look.
+    card.append(el('p', 'error',
+      `A Condition* check in the unit file failed, so systemd skipped it ` +
+      `without reporting an error. Run: systemctl status ${svc.unit}`));
+  }
   return card;
 }
 
@@ -124,6 +143,14 @@ function renderTimers(timers) {
       card.append(el('p', 'sub', 'Not scheduled'));
     }
     card.append(el('p', 'sub', t.last && t.last !== 'n/a' ? `Last run: ${t.last}` : 'Never run yet'));
+    if (t.lastFailed) {
+      const detail = t.lastExitCode !== null && t.lastExitCode !== undefined
+        ? ` (exit ${t.lastExitCode})`
+        : '';
+      card.append(el('p', 'error',
+        `Last run failed${detail} — check the scan log; its summary can still ` +
+        'read "Infected files: 0" even though nothing was scanned.'));
+    }
     return card;
   }));
 }

@@ -16,7 +16,12 @@ then change any of it without editing config files or remembering
 
 **Dashboard** — service state, signature age and definition serial, next
 scheduled scans, and one-click update / quick scan / full scan / whole-system
-scan.
+scan. Service state is reported against what a component actually *does*, not
+just what systemd says about it: real-time protection reads **Not protecting**
+when clamd is down (it is a clamd client, so it scans nothing without it), a
+unit skipped by an unmet `Condition*` check is called out rather than shown as
+merely stopped, and a scheduled scan that exited non-zero is flagged even
+though its log summary still says `Infected files: 0`.
 
 **Configure** — toggle real-time blocking, add or remove watched folders, edit
 scan schedules (validated by `systemd-analyze calendar` before saving), and
@@ -70,6 +75,48 @@ cp clamav-monitor_*_amd64.deb /tmp/ && sudo apt install /tmp/clamav-monitor_*_am
 ```
 
 Do not `chmod 755` your home directory to silence it.
+</details>
+
+<details>
+<summary>Dashboard says the scanner daemon is "Blocked by start condition"</summary>
+
+systemd skipped the unit because a `Condition*` check in it failed. A skipped
+unit is reported as plain `inactive (dead)` with no error logged anywhere, and
+units that `Requires=` it still start — so protection can stop without anything
+appearing to be wrong.
+
+The common cause on an upstream install is a hand-written `clamd.service`
+carrying:
+
+```ini
+ConditionPathExists=/usr/local/share/clamav/daily.cvd
+```
+
+freshclam ships `daily.cvd` on a fresh install, then **replaces** it with
+`daily.cld` the first time it applies an incremental patch. The condition is
+then permanently unmet and clamd never starts again, while freshclam keeps
+updating signatures — so the dashboard shows current definitions the whole
+time. Fix it with a drop-in that matches either extension:
+
+```bash
+sudo systemctl edit clamd.service
+```
+
+```ini
+[Unit]
+ConditionPathExists=
+ConditionPathExistsGlob=/usr/local/share/clamav/daily.c?d
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl start clamd
+sudo systemctl restart clamav-clamonacc
+```
+
+Restart `clamav-clamonacc` too: it is a client of clamd, and with the daemon
+gone it stays `active (running)` while scanning nothing. The dashboard reports
+that state as **Not protecting**.
 </details>
 
 Optional, and removes password prompts when viewing logs:

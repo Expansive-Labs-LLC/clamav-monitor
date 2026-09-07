@@ -22,7 +22,17 @@ const HELPER = '/usr/lib/clamav-monitor/clamav-monitor-helper';
 const SERVICES = [
   { id: 'clamd', label: 'Scanner daemon', desc: 'Holds signatures in memory; required by everything else' },
   { id: 'clamav-freshclam', label: 'Signature updater', desc: 'Checks for new definitions hourly' },
-  { id: 'clamav-clamonacc', label: 'Real-time protection', desc: 'Blocks access to infected files as they appear' },
+  {
+    id: 'clamav-clamonacc', label: 'Real-time protection',
+    desc: 'Blocks access to infected files as they appear',
+    // clamonacc is a *client* of clamd, not a scanner. systemd's own
+    // Requires=clamd.service does not keep them honest: if clamd is skipped by
+    // an unmet Condition, systemd treats the dependency as satisfied and
+    // starts clamonacc anyway, which then sits "active (running)" against a
+    // socket that does not exist. Track the dependency here so the dashboard
+    // can say so instead of showing a green light over nothing.
+    requires: 'clamd',
+  },
 ];
 
 const TIMERS = [
@@ -101,13 +111,24 @@ async function runPrivileged(helperArgs) {
 // ---------------------------------------------------------------------------
 
 async function unitState(unit) {
-  const props = 'ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,Description';
+  // ConditionResult matters as much as ActiveState here. A unit whose
+  // Condition* checks fail is *skipped*, not failed: systemd reports it as
+  // plain "inactive (dead)" with no error anywhere, and dependent units start
+  // as though it were fine. That is a silent-protection-loss failure mode, so
+  // it gets its own state rather than being flattened into "Stopped".
+  const props = 'ActiveState,SubState,UnitFileState,ActiveEnterTimestamp,Description,' +
+                'ConditionResult,ConditionTimestamp';
   const res = await run('systemctl', ['show', unit, `--property=${props}`]);
   const out = {};
   for (const line of res.stdout.split('\n')) {
     const i = line.indexOf('=');
     if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
   }
+  // Only meaningful while the unit is down; a running unit's last condition
+  // check is ancient history.
+  const skipped = (out.ActiveState || '') !== 'active' &&
+                  (out.ConditionResult || '') === 'no';
+
   return {
     unit,
     active: out.ActiveState || 'unknown',
@@ -115,6 +136,8 @@ async function unitState(unit) {
     enabled: out.UnitFileState || 'unknown',
     since: out.ActiveEnterTimestamp || '',
     installed: (out.UnitFileState || '') !== '',
+    conditionFailed: skipped,
+    conditionCheckedAt: skipped ? (out.ConditionTimestamp || '') : '',
   };
 }
 
@@ -194,6 +217,26 @@ function humanDuration(ms) {
   return `${Math.round(hours / 24)} days`;
 }
 
+// The timer tells you when a scan ran; only the service it triggered tells you
+// whether it worked. Without this, a scan that never connected to clamd (which
+// still prints "Infected files: 0" into its log) is indistinguishable on the
+// dashboard from a scan that came back clean.
+async function serviceOutcome(unit) {
+  const props = 'Result,ExecMainStatus,ActiveState,ExecMainExitTimestamp';
+  const res = await run('systemctl', ['show', unit, `--property=${props}`]);
+  const out = {};
+  for (const line of res.stdout.split('\n')) {
+    const i = line.indexOf('=');
+    if (i > 0) out[line.slice(0, i)] = line.slice(i + 1);
+  }
+  const code = Number(out.ExecMainStatus);
+  return {
+    result: out.Result || 'unknown',
+    exitCode: Number.isFinite(code) ? code : null,
+    state: out.ActiveState || 'unknown',
+  };
+}
+
 async function timerInfo() {
   const res = await run('systemctl', ['list-timers', '--all', '--no-pager', '--output=json', 'clamav-*']);
   let parsed = [];
@@ -209,8 +252,16 @@ async function timerInfo() {
     // Reported as "{ OnCalendar=*-*-* 12:30:00 ; next_elapse=... }" -- pull out
     // just the expression so the Configure tab shows what is really in effect,
     // including any drop-in override the app itself wrote.
-    const cal = await run('systemctl', ['show', t.id, '-p', 'TimersCalendar', '--value']);
+    const [cal, outcome] = await Promise.all([
+      run('systemctl', ['show', t.id, '-p', 'TimersCalendar', '--value']),
+      serviceOutcome(t.service),
+    ]);
     const m = cal.stdout.match(/OnCalendar=([^;}]+)/);
+
+    // A unit that has never run also reports Result=success, so a failure is
+    // only meaningful once the timer has actually fired at least once.
+    const ran = Boolean(last);
+    const failed = ran && (outcome.result !== 'success' || outcome.state === 'failed');
 
     return {
       ...t,
@@ -219,6 +270,10 @@ async function timerInfo() {
       last: last ? last.toLocaleString() : null,
       calendar: m ? m[1].trim() : null,
       installed: Boolean(row),
+      lastFailed: failed,
+      lastResult: outcome.result,
+      lastExitCode: outcome.exitCode,
+      serviceState: outcome.state,
     };
   }));
 }
@@ -253,6 +308,25 @@ async function accessInfo() {
   return { logsReadable: logs, pendingRelogin, user };
 }
 
+// A service that is "active" but whose dependency is down is not working, and
+// is the most dangerous state this app can render: the user reads a green dot
+// as protection. Mark it so the UI can contradict systemd.
+function markDegraded(services) {
+  for (const svc of services) {
+    svc.degraded = false;
+    svc.degradedReason = null;
+    if (!svc.requires || svc.active !== 'active') continue;
+
+    const dep = services.find((s) => s.id === svc.requires);
+    if (!dep || dep.active === 'active') continue;
+
+    svc.degraded = true;
+    svc.degradedReason = `${dep.label} is ` +
+      `${dep.active === 'failed' ? 'failed' : 'stopped'}, so nothing is being scanned`;
+  }
+  return services;
+}
+
 async function collectStatus() {
   const [services, timers, db, access] = await Promise.all([
     Promise.all(SERVICES.map(async (s) => ({ ...s, ...(await unitState(s.id)) }))),
@@ -260,7 +334,13 @@ async function collectStatus() {
     databaseInfo(),
     accessInfo(),
   ]);
-  return { services, timers, db, access, collectedAt: new Date().toISOString() };
+  return {
+    services: markDegraded(services),
+    timers,
+    db,
+    access,
+    collectedAt: new Date().toISOString(),
+  };
 }
 
 // ---------------------------------------------------------------------------
