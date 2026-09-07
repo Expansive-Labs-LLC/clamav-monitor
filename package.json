@@ -1,6 +1,6 @@
 {
   "name": "clamav-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Desktop monitor and configuration UI for the local ClamAV setup",
   "main": "main.js",
   "author": "Expansive Labs <derek@expansivelabs.io>",
