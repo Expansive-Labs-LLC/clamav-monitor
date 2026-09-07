@@ -151,13 +151,12 @@ function renderTimers(timers) {
       card.append(el('p', 'sub',
         'The log fills in as it goes, and the summary is written at the end.'));
     }
-    if (t.lastFailed) {
-      const detail = t.lastExitCode !== null && t.lastExitCode !== undefined
-        ? ` (exit ${t.lastExitCode})`
-        : '';
-      card.append(el('p', 'error',
-        `Last run failed${detail} — check the scan log; its summary can still ` +
-        'read "Infected files: 0" even though nothing was scanned.'));
+    // 'errors' is deliberately not red. A quick scan over /tmp cannot avoid
+    // hitting sockets it may not read, so exit 2 with a completed summary is
+    // the normal case -- flagging it red would train the user to ignore red.
+    if (t.lastMessage) {
+      const cls = t.lastSeverity === 'errors' ? 'warnline' : 'error';
+      card.append(el('p', cls, t.lastMessage));
     }
     return card;
   }));
